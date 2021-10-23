@@ -1,0 +1,557 @@
+---
+title: "dVC-WMH-COG in HCHS"
+author: "ES"
+date: "10/19/2021"
+output: 
+  html_document:
+    keep_md: yes
+---
+
+```{r setup, include=FALSE}
+options(bitmapType = 'cairo')
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+
+```{r loaddata}
+#source('./prepdata.r')
+source('loadpackages.r')
+load('prepdata.RData')
+```
+
+```{r}
+d.struct %>%  Hmisc::describe()
+```
+
+```{r wmhdistplot, fig.align="center", fig.cap='Fig 1-C', fig.height=6, fig.width=5, warning=FALSE}
+
+p.preds.all <- lapply(preds.all, function(y){
+  d.struct %>% 
+  dplyr::select(starts_with(all_of(y))) %>% 
+  pivot_longer(cols = y, names_to = 'var', values_to = 'value') %>% 
+  ggplot(aes(x = 1, y = value)) +
+  geom_violin(fill = 'snow2', size = .1) +
+  geom_quasirandom(aes(), alpha = .5, size = .25, stroke = .1) +
+  stat_summary(aes(x = 1.05), fun.data = mean_sdl, fun.args = list(mult = 1)
+               , geom = "errorbar", color = 'red', width = .2, , size = .25) + 
+  stat_summary(aes(x = 1.05), fun = mean, geom = 'point', pch = 23, color = 'red', fill = alpha('snow2',1), , size = 1, stroke = .5) +
+  stat_summary(aes(x = .95)
+              , fun.min = function(z) { quantile(z,0.25) }
+              , fun.max = function(z) { quantile(z,0.75) }
+              , fun = median
+              , geom = "errorbar", color = 'orange', width = .2, , size = .25) +
+  stat_summary(aes(x = .95), fun = median, geom = 'point', pch = 23, color = 'orange', fill = alpha('snow2',1), size = 1, stroke = .5) +
+  facet_wrap(~ var, scales = 'fixed', labeller = labeller(var = c(WMHsmooth = ''
+                                                                  , WMHsmoothdeep = 'Deep'
+                                                                  , WMHsmoothperi = 'Periventricular'))) +
+  scale_x_log10('', breaks = NULL, minor_breaks = NULL) +
+  scale_y_log10('White matter hyperintensity volume [ml]', breaks = breaks, minor_breaks = minor_breaks, labels = scales::number_format(accuracy = .1)) +
+  scale_color_gradient('Age [years]', low = 'blue', high = 'red') +
+  #annotation_logticks(scaled = TRUE, sides = 'l') +
+  guides(color = guide_colorbar(title.position = 'top')) +
+  theme_bw() +
+  theme(legend.direction = 'horizontal'
+        , legend.position = 'bottom'
+        , legend.margin=margin(0,0,0,0)
+        , legend.box.margin=margin(-15,0,0,0)
+        , legend.text = element_text(size = 5)
+        , legend.title = element_text(size = 6)
+        , legend.key.height = unit(0.1, 'cm')
+        , axis.title = element_text(size = 6)
+        , axis.text = element_text(size = 6)
+        , strip.background = element_blank()
+        , strip.text = element_text(size = 4))
+}) %>% setNames(preds.all)
+
+p.preds.all[[1]]
+
+mapply(function(p, pred){
+  ggsave(filename = paste0('./../../derivatives/figures/preddist_', pred, '.png')
+                                   , plot = p, device = 'tiff', dpi = 600, width = 5, height = 7.5, units = 'cm')
+  }, p.preds.all, preds.all)
+```
+
+
+
+```{r demographics}
+clindata.unique %>% Hmisc::describe()
+clindata.unique %>% group_by(sex) %>% summarise(mean(age), sd(age))
+```
+
+
+
+Association WMH and CVRFs
+```{r}
+lapply(preds.all, function(y){
+d.struct %>% 
+  merge(clindata.unique) %>%
+  dplyr::filter(!!as.symbol(y) > 0) %>% 
+  mutate(smoking_yn = if_else(smoking_yn == 'active', 'yes', 'no')) %$% 
+  glm(as.formula(paste0(y,'~ I(age/10) + sex + hypertension + diabetes + smoking_yn + BMI')), data = ., family = Gamma(link = 'log')) %$% 
+  bind_cols(nobs = nobs(.), tidy(., exponentiate = TRUE, conf.int = TRUE))
+  }) %>% setNames(preds.all)
+```
+
+```{r}
+require(mice)
+mydata <- d.struct %>% merge(clindata.unique) %>% 
+  dplyr::select(WMHsmooth, psmd, age, hypertension, diabetes, smoking_yn, BMI, sex) %>% 
+  mutate(smoking_yn = as.factor(if_else(smoking_yn == 'active', 'yes', 'no')))
+mydata.mice <- mice(mydata, m = 10)
+fit <- with(mydata.mice, exp = glm(WMHsmooth ~ I(age/10) + sex + hypertension + diabetes + smoking_yn + BMI, family = Gamma(link = 'log')))
+combine <- pool(fit)
+summary(combine, conf.int = TRUE, exponentiate = TRUE) %>% 
+  as_tibble() 
+
+fit <- with(mydata.mice, exp = glm(psmd ~ I(age/10) + sex + hypertension + diabetes + smoking_yn + BMI, family = Gamma(link = 'log')))
+combine <- pool(fit)
+summary(combine, conf.int = TRUE, exponentiate = TRUE) %>% 
+  as_tibble()
+```
+
+
+# Cognitive data
+```{r}
+clindata %>% group_by(ID) %>% summarise(x = prod(cogvalue)) %>% filter(is.finite(x)) %>% nrow()
+673/979
+
+clindata %>% 
+  group_by(cogmeas) %>% 
+  summarise(sum(is.na(cogvalue))
+            , mean(cogvalue, na.rm = TRUE)
+            , sd(cogvalue, na.rm = TRUE)
+            , q = c(0, .25, .5, .75, 1)
+            , quantile(cogvalue, na.rm = TRUE)
+            ) %>% 
+  dplyr::select(-q) %>% 
+  print(n = Inf)
+```
+
+
+## Association between cognitive measures and age
+```{r}
+clindata %>% 
+  filter(cogmeas %in% c('TMTA', 'TMTB', 'animaltest')) %>% 
+  group_by(cogmeas) %>% 
+  nest() %>% 
+  mutate(mdl = map(data, ~glm(cogvalue ~ I(age/10), family = Gamma(link = 'log'), data = .))
+         , tidy = map(mdl, ~tidy(., exponentiate = TRUE, conf.int = TRUE))) %>% 
+  unnest(tidy) %>% 
+  dplyr::select(-c(data, mdl, std.error, statistic)) %>% 
+  print(n=Inf)
+
+maxvalues <- c(MMST = 30, Recall_Sumwords = 10, Wortschatz = 37)
+clindata %>% filter(cogmeas %in% c('MMST', 'Recall_Sumwords', 'Wortschatz')) %>% 
+  group_by(cogmeas) %>% 
+  mutate(maxvalue = maxvalues[as.character(cogmeas)]) %>% 
+  nest() %>% 
+  mutate(mdl = map(data, ~glm(cbind(cogvalue, I(maxvalue-cogvalue)) ~ I(age/10), family = binomial(link = 'logit'), data = ., na.action = na.exclude) )
+         , tidy = map(mdl, ~tidy(., exponentiate = TRUE, conf.int = TRUE))) %>% 
+  unnest(tidy) %>% 
+  dplyr::select(-c(data, mdl, std.error, statistic))
+
+```
+
+# Model cognitive measures as a function of WMH
+```{r}
+m <- lapply(preds.all, function(y){
+  c(
+    clindata %>% 
+      filter(cogmeas %in% c('TMTA', 'TMTB', 'animaltest')) %>% 
+      merge(d.struct) %>% 
+      dplyr::filter(!!as.symbol(y)>0) %>% 
+      group_by(cogmeas) %>%
+      nest() %>% 
+      mutate(mdl = map(data, ~glm(as.formula(paste0('cogvalue ~ log10(', y, ')')), family = Gamma(link = 'log'), data = .))
+             , tidy = map(mdl, ~tidy(., exponentiate = TRUE, conf.int = TRUE))) %$% 
+      setNames(as.list(.$mdl), .$cogmeas)
+    
+  , clindata %>% 
+      filter(cogmeas %in% c('MMST', 'Recall_Sumwords', 'Wortschatz')) %>% 
+    merge(d.struct) %>% 
+    dplyr::filter(!!as.symbol(y)>0) %>% 
+    group_by(cogmeas) %>% 
+    mutate(maxvalue = maxvalues[as.character(cogmeas)]) %>% 
+    nest() %>% 
+    mutate(mdl = map(data, ~glm(as.formula(paste0('cbind(cogvalue, I(maxvalue-cogvalue)) ~ log10(', y, ')')), family = binomial(), data = ., na.action = na.exclude))
+           , tidy = map(mdl, ~tidy(., exponentiate = TRUE, conf.int = TRUE))) %$% 
+    setNames(as.list(.$mdl), .$cogmeas)
+  )
+}) %>% setNames(preds.all)
+```
+
+```{r fig.align='center', fig.height=10, fig.width=18, fig.cap='Fig 2', warning=FALSE}
+newWMHsmooth <- lapply(preds.all, function(y){
+  seq(min(d.struct[d.struct[y]>0, y], na.rm = TRUE), max(d.struct[y], na.rm = TRUE), length.out = 1000)
+}) %>% setNames(preds.all)
+
+newdata <- lapply(preds.all, function(y){
+  do.call(rbind,lapply(c('TMTA','TMTB', 'MMST', 'Recall_Sumwords', "animaltest", "Wortschatz")
+                  , function(cogmeas){predict(m[[y]][[cogmeas]]
+                                              , type = 'response'
+                                              , se.fit = TRUE
+                                              , newdata = (data.frame(newWMHsmooth[y]) %>% setNames(y))) %>% 
+                      as.data.frame() %>% mutate('{y}' := newWMHsmooth[[y]], cogmeas = cogmeas)})
+) %>% 
+  mutate(fit = case_when(cogmeas == 'MMST' ~ 30*fit
+                         , cogmeas == 'Recall_Sumwords' ~ 10*fit
+                         , cogmeas == 'Wortschatz' ~ 37*fit
+                         , TRUE ~ fit)
+         , se.fit = case_when(cogmeas == 'MMST' ~ 30*se.fit
+                              , cogmeas == 'Recall_Sumwords' ~ 10*se.fit
+                              , cogmeas == 'Wortschatz' ~ 37*se.fit
+                              , TRUE ~ se.fit)) %>% 
+    mutate(cogmeas = factor(cogmeas, levels = c('MMST','animaltest','Recall_Sumwords','Wortschatz','TMTA','TMTB'), ordered = TRUE))
+}) %>% 
+  setNames(preds.all)
+
+
+p.preds.all.cog <- lapply(preds.all, function(y){
+
+clindata %>% 
+  merge(d.struct) %>% ungroup() %>% 
+  arrange(!!as.symbol(y)) %>% 
+  ggplot(aes_(x = as.name(y), y = quote(cogvalue))) +
+  geom_hex() + guides(fill = FALSE) + 
+  geom_line(data = newdata[[y]]
+            , aes_(x = as.name(y), y = quote(fit)), inherit.aes = FALSE, color = 'darkred') +
+  geom_ribbon(data = newdata[[y]]
+              , aes_(x = as.name(y), ymax = quote(fit + se.fit), ymin = quote(fit - se.fit)), inherit.aes = FALSE, fill = 'darkred', alpha = .5) +
+    facet_wrap(~cogmeas, scales = 'free', strip.position = 'left'
+             , labeller = labeller(cogmeas = c('MMST' = 'Mini-mental state exam'
+                                  , 'Recall_Sumwords' = 'Word recall [#]'
+                                  , 'TMTA' = 'TMT Part A [s]'
+                                  , 'TMTB' = 'TMT Part B [s]'
+                                  , 'Wortschatz' = 'Vocabulary [#]'
+                                  , 'animaltest'= 'Animal Naming [#]'))) +
+  #scale_x_log10(if_else(stringr::str_starts(y,'WMH'),'White matter lesion volume [ml]', 'PSMD'), breaks = scales::pretty_breaks(2), labels = scales::number_format(accuracy = 0.0001)) +
+  scale_x_log10(if_else(stringr::str_starts(y,'WMH'),'White matter lesion volume [ml]', 'PSMD'), breaks = breaks, minor_breaks = minor_breaks) +
+  scale_y_continuous('', breaks = scales::pretty_breaks(4)) +
+  scale_fill_material() +
+  theme_minimal() +
+  theme(strip.placement = 'outside'
+        , panel.grid = element_line(size = .25))
+}) %>% setNames(preds.all)
+
+
+p.preds.all.cog[[1]]
+
+mapply(function(p, pred){ggsave(filename = paste0('./../../derivatives/figures/predcog_', pred, '.png')
+                                   , plot = p, device = 'png', dpi = 600, width = 18, height = 10, units = 'cm')}, p.preds.all.cog, preds.all)
+
+
+```
+
+```{r}
+mm <- lapply(preds.all, function(y){
+bind_rows(
+
+clindata %>% filter(cogmeas %in% c('TMTA', 'TMTB', 'animaltest')) %>% 
+  merge(d.struct) %>% 
+  dplyr::filter(!!as.symbol(y)>0) %>% 
+  group_by(cogmeas) %>% 
+  mutate(yy = log(!!as.symbol(y), base = quantile(!!as.symbol(y),.75)/quantile(!!as.symbol(y),.25))) %>% 
+  nest() %>% 
+  mutate(mdl = map(data, ~glm(cogvalue ~ yy + age + sex, family = Gamma(link = 'log'), data = ., na.action = na.exclude))
+         , tidy = map(mdl, ~tidy(., exponentiate = TRUE, conf.int = TRUE))) %>% 
+  unnest(tidy) %>% 
+  dplyr::select(-data, -mdl, -std.error, -statistic) %>% 
+  dplyr::filter(term == 'yy')
+
+, clindata %>% filter(cogmeas %in% c('MMST', 'Recall_Sumwords', 'Wortschatz')) %>% 
+  merge(d.struct) %>% 
+  dplyr::filter(!!as.symbol(y)>0) %>% 
+  group_by(cogmeas) %>% 
+  mutate(maxvalue = maxvalues[as.character(cogmeas)]) %>% 
+  mutate(yy = log(!!as.symbol(y), base = quantile(!!as.symbol(y),.75)/quantile(!!as.symbol(y),.25))) %>% 
+  nest() %>% 
+  mutate(mdl = map(data, ~glm(cbind(cogvalue, I(maxvalue-cogvalue)) ~ yy + age + sex, family = binomial(), data = ., na.action = na.exclude) )
+         , tidy = map(mdl, ~tidy(., exponentiate = TRUE, conf.int = TRUE))) %>% 
+  unnest(tidy) %>% 
+  dplyr::select(-data, -mdl, -std.error, -statistic) %>% 
+  dplyr::filter(term == 'yy')
+) })  %>% setNames(preds.all) 
+mm
+
+mm$WMHsmooth$p.value %>% p.adjust(method = 'holm')
+
+```
+
+
+
+
+
+# Structure-Function relation
+```{r}
+p <- c()
+p <- lm(switchrate ~ log(WMHsmooth, 4.695202), data = df.mean) %>% 
+  tidy(conf.int = TRUE)%T>% print() %>% 
+  pull('p.value') %>% .[[2]]%>% 
+  prepend(p)
+p <- lm(meandwelltime ~ log(WMHsmooth, 4.695202), data = df.mean) %>% 
+  tidy(conf.int = TRUE)%T>% print() %>% 
+  pull('p.value') %>% .[[2]]%>% 
+  prepend(p)
+p <- lm(switchrate ~ log(psmd, 1.262355), data = df.mean) %>% 
+  tidy(conf.int = TRUE) %T>% print() %>% 
+  pull('p.value') %>% .[[2]] %>% 
+  prepend(p)
+p <- lm(meandwelltime ~ log(psmd, 1.262355), data = df.mean) %>% 
+  tidy(conf.int = TRUE)%T>% print() %>% 
+  pull('p.value') %>% .[[2]]%>% 
+  prepend(p)
+p
+p %>% p.adjust(method = 'holm')
+```
+
+
+```{r}
+dd %>% 
+  group_by(meas, state) %>% 
+  summarise(mean(value), sd(value)) %>% 
+  arrange(meas, state)
+```
+
+```{r fig.align='center', fig.height=10, fig.width=18, warning=FALSE}
+lapply(preds.all, function(y){
+dd %>% merge(d.struct) %>% 
+  mutate(state = factor(state, levels = c('DMN+','DMN-', 'VIS+', 'VIS-','FPCN-'), ordered = TRUE)) %>% 
+  ggplot(aes_(x = as.name(y), y = quote(value))) +
+  geom_hex() +
+  geom_smooth(method = 'lm', color = 'darkred', fill = 'darkred') +
+  facet_grid(meas ~ state, scales = 'free'
+             , switch = 'y'
+             , labeller = labeller(meas = c('fracocc' = 'Fractional occupancy', 'dwell' = 'Dwell time [TR]'))) +
+  guides(fill = FALSE) +
+  scale_x_log10(if_else(stringr::str_starts(y,'WMH'),'White matter lesion volume [ml]', 'PSMD'), breaks = scales::pretty_breaks(2), labels = scales::number_format(accuracy = 0.0001)) +
+  #scale_x_log10('White matter leson volume [ml]', labels = scales::number_format(accuracy = .01), breaks = breaks, minor_breaks = minor_breaks) +
+  annotation_logticks(scaled = TRUE, sides = '') +
+  scale_y_continuous('') +
+  scale_fill_material() +
+  theme_minimal() +
+  theme(strip.background = element_blank()
+        , strip.placement = "outside"
+        , panel.grid = element_line(size = .25))
+}) %>% setNames(preds.all) %>% 
+  (function(x){mapply(function(a,b)ggsave(filename = paste0('./../../derivatives/figures/WMHtvFC_', b, '_', design, '.png')
+                                          , plot = a
+                                          , device = 'png', width = 18, height = 10, units = 'cm'
+                                          , dpi = 600)
+                      , x, names(x), USE.NAMES = FALSE, SIMPLIFY = TRUE)})
+
+```
+
+```{r}
+lapply(preds.all, function(y){
+dd %>% 
+  merge(clindata.unique) %>%  
+  group_by(meas, state) %>% 
+    dplyr::filter(!!as.symbol(y)>0) %>% 
+  mutate(q1 = quantile(!!as.symbol(y), prob=c(.75))
+         , q3 = quantile(!!as.symbol(y), prob=c(.25))
+         , ytrans = log(!!as.symbol(y), q1/q3)) %>% 
+  nest() %>% 
+  mutate(mdl = map(data, ~lm(value ~ ytrans + age + sex, data = .))
+         , tidy = map(mdl, tidy)) %>% 
+  unnest(tidy) %>% 
+  filter(p.value < 0.1 & term == 'ytrans')
+}) %>% setNames(preds.all)
+```
+
+```{r betareg, fig.height=10, fig.width=18, fig.cap='Fig 4'}
+
+lapply(preds.all, function(y){
+dd %>% 
+  merge(clindata.unique) %>%  
+  group_by(meas, state) %>% 
+  dplyr::filter(meas == 'fracocc') %>% 
+  dplyr::filter(!!as.symbol(y)>0) %>% 
+  mutate(q1 = quantile(!!as.symbol(y), prob=c(.75))
+         , q3 = quantile(!!as.symbol(y), prob=c(.25))
+         , ytrans = log(!!as.symbol(y), q1/q3)) %>% 
+  nest() %>% 
+  mutate(mdl = map(data, ~betareg(value ~ ytrans + age + sex, data = ., link = 'logit', link.phi = 'log'))
+         , tidy = map(mdl, ~tidy(., exponentiate = TRUE, conf.int = TRUE))) %>% 
+  unnest(tidy) %>% mutate(across(c(estimate, starts_with('conf')), exp)) %>% 
+  filter(p.value < 0.1 & term == 'ytrans')
+}) %>% setNames(preds.all)
+
+lapply(preds.all, function(y){
+dd %>% 
+  merge(clindata.unique) %>%  
+  group_by(meas, state) %>% 
+  dplyr::filter(meas == 'dwell') %>% 
+  dplyr::filter(!!as.symbol(y)>0) %>% 
+  mutate(q1 = quantile(!!as.symbol(y), prob=c(.75))
+         , q3 = quantile(!!as.symbol(y), prob=c(.25))
+         , ytrans = log(!!as.symbol(y), q1/q3)) %>% 
+  nest() %>% 
+  mutate(mdl = map(data, ~glm(value ~ ytrans + age + sex, data = ., family = Gamma(link = 'log')))
+         , tidy = map(mdl, ~tidy(., exponentiate = TRUE))) %>% 
+  unnest(tidy) %>% 
+  filter(p.value < 0.1 & term == 'ytrans')
+}) %>% setNames(preds.all)
+```
+```{r betaregplot, fig.align='center', fig.height=10, fig.width=18, warning=FALSE}
+ynew <- seq(from = min(d.struct$WMHsmooth), to = max(d.struct$WMHsmooth), length.out = 1e4)
+
+eff.beta <- data.frame()
+for( s in unique(dd$state) ){
+  temp.data <- dd %>% 
+    merge(clindata.unique) %>%  
+    dplyr::filter(meas == 'fracocc' & state == s) %>% 
+    dplyr::filter(WMHsmooth>0)
+  m <- betareg(value ~ log10(WMHsmooth), data = temp.data, link = 'logit', link.phi = 'log')
+  eff.beta <- eff.beta %>% bind_rows(allEffects(m, xlevels = list(WMHsmooth = ynew))$`log10(WMHsmooth)` %>% 
+      as.data.frame() %>% as_tibble() %>% mutate(state = s, meas = 'fracocc')
+  )
+}
+
+eff.gamma <- data.frame()
+for( s in unique(dd$state) ){
+  temp.data <- dd %>% 
+    merge(clindata.unique) %>%  
+    dplyr::filter(meas == 'dwell' & state == s) %>% 
+    dplyr::filter(WMHsmooth>0)
+  m <- glm(value ~ log10(WMHsmooth), data = temp.data, family = Gamma(link = 'log'))
+  eff.gamma <- eff.gamma %>% bind_rows(allEffects(m, xlevels = list(WMHsmooth = ynew))$`log10(WMHsmooth)` %>% 
+      as.data.frame() %>% as_tibble() %>% mutate(state = s, meas = 'dwell')
+  )
+}
+
+eff <- bind_rows(eff.beta, eff.gamma) %>% 
+  mutate(state = factor(state, levels = c('DMN+','DMN-', 'VIS+', 'VIS-','FPCN-'), ordered = TRUE))
+
+dd %>% 
+  merge(clindata.unique) %>%  
+  mutate(state = factor(state, levels = c('DMN+','DMN-', 'VIS+', 'VIS-','FPCN-'), ordered = TRUE)) %>% 
+  dplyr::filter(WMHsmooth>0) %>% 
+  ggplot(aes(x = WMHsmooth, y = value)) +
+  geom_hex() +
+  geom_line(data = eff, aes(x = WMHsmooth, y = fit), inherit.aes = FALSE, color = 'darkred') +
+  geom_ribbon(data = eff, aes(y = fit, ymin = lower, ymax = upper), alpha = .5, fill = 'darkred') +
+  facet_grid(meas ~ state, scales = 'free'
+             , switch = 'y'
+             , labeller = labeller(meas = c('fracocc' = 'Fractional occupancy', 'dwell' = 'Dwell time [TR]'))) +
+  guides(fill = 'none') +
+  scale_x_log10('White matter lesion volume [ml]', labels = scales::number_format(accuracy = .01), breaks = breaks, minor_breaks = minor_breaks) +
+  annotation_logticks(scaled = TRUE, sides = '') +
+  scale_y_continuous('') +
+  scale_fill_material() +
+  theme_minimal() +
+  theme(strip.background = element_blank()
+        , strip.placement = "outside"
+        , panel.grid = element_line(size = .25))
+
+ggsave(filename = paste0('./../../derivatives/figures/WMHtvFC_WMHsmooth_beta_', design, '.tiff')
+                                          , plot = last_plot()
+                                          , device = 'tiff', width = 18, height = 10, units = 'cm'
+                                          , dpi = 600)
+
+```
+
+
+# Model cognitive measures as a function of brain dynamics
+```{r}
+df.mean %>% 
+  filter(cogmeas %in% c('TMTA', 'TMTB', 'animaltest')) %>%
+  group_by(cogmeas) %>% nest() %>% 
+  mutate(mdl = map(data, ~glm(cogvalue ~ switchrate + age + sex + educationyears + log10(WMHsmooth), family = Gamma(link = 'log'), data = .))
+         , tidy = map(mdl, ~tidy(., exponentiate = TRUE, conf.int = TRUE))) %>% 
+  unnest(tidy)
+  
+```
+
+
+```{r}
+clindata %>% 
+  merge(dd) %>% 
+  filter(cogmeas %in% c('TMTA', 'TMTB', 'animaltest')) %>% 
+  dplyr::filter(WMHsmooth>0) %>% 
+  group_by(cogmeas, meas, state) %>% 
+  nest() %>% 
+  mutate(mdl = map(data, ~glm(as.formula(paste0('cogvalue ~ value + age + sex + educationyears + log10(WMHsmooth)')), family = Gamma(link = 'log'), data = .))
+         , tidy = map(mdl, ~tidy(., exponentiate = TRUE, conf.int = TRUE))) %>% 
+  unnest(tidy) %>% 
+  dplyr::select(-c(data, mdl, std.error)) %>% 
+  dplyr::filter(term == 'value' & p.value < 0.05)
+  
+
+clindata %>% 
+  merge(dd) %>% 
+  filter(cogmeas %in% c('MMST', 'Recall_Sumwords', 'Wortschatz')) %>% 
+  merge(d.struct) %>% 
+  dplyr::filter(WMHsmooth>0) %>% 
+  group_by(cogmeas) %>% 
+  mutate(maxvalue = maxvalues[as.character(cogmeas)]) %>% 
+  nest() %>% 
+  mutate(mdl = map(data, ~glm(as.formula(paste0('cbind(cogvalue, I(maxvalue-cogvalue)) ~ value + log10(WMHsmooth)')), family = binomial(), data = ., na.action = na.exclude))
+         , tidy = map(mdl, ~tidy(., exponentiate = TRUE, conf.int = TRUE))) %>% 
+  unnest(tidy) %>% 
+  dplyr::filter(term == 'value' & p.value < 0.05)
+```
+
+# Transition probabilities
+```{r}
+p.TP <- TP.data %>% 
+group_by(state_in, state_out) %>% 
+  summarise(prob = mean(prob, na.rm = TRUE)) %>% 
+  mutate(lab = scales::number_format(accuracy = .01)(prob)) %>% 
+  mutate(fillcol = if_else(state_in!=state_out, prob, 0)) %>% 
+  filter(!is.na(state_in)) %>% 
+  ggplot(aes(x = state_in, y = state_out, fill = fillcol)) +
+  geom_tile() +
+  geom_text(aes(label = lab), size = 3) +
+  coord_equal(clip = 'off') +
+  geom_text(data=~.x[1,], label=expression('State'[k]), x=3, y=.25, inherit.aes = FALSE, size = 3) +
+  scale_x_discrete('', expand = expansion(0,0), position = 'top') +
+  scale_y_discrete(expression('State'[k+1]), expand = expansion(0,0)) +
+  scale_fill_gradient2('Transition probability', low="white", high="red", mid = 'snow2', midpoint = 0.2) +
+  guides(fill = 'none') +
+  theme_minimal() +
+  theme(panel.grid = element_blank()
+        , legend.position = 'bottom'
+        , legend.spacing.x = unit(0, 'cm')
+        , axis.text.y = element_text(angle = 90)) 
+```
+
+```{r, fig.height=9, fig.width=18, fig.cap='Fig 5', fig.align='center'}
+p.TP.reg <- TP.data %>% 
+  merge(clindata.unique) %>% 
+  merge(d.struct) %>% 
+  filter(prob > 0 & prob < 1) %>% 
+  #filter(state_in < state_out) %>%
+  group_by(state_in, state_out) %>% 
+  nest() %>% 
+  mutate(mdl = map(data, ~betareg(prob ~ log10(WMHsmooth) + age + sex, data = .))
+         , tidy = map(mdl, tidy)) %>% 
+  unnest(tidy) %>% 
+  filter(term == 'log10(WMHsmooth)' & p.value < 0.05) %>% 
+  left_join(TP.data) %>% 
+  left_join(d.struct) %>% 
+  filter(prob > 0 & prob < 1) %>% 
+  mutate(state_out = forcats::fct_rev(state_out)) %>% 
+  ggplot(aes(x = WMHsmooth, y=prob)) +
+  geom_hex(alpha = .5) +
+  geom_smooth(method = 'lm', color = 'black', size = .5) +
+  geom_label(data = ~dplyr::select(., c(state_in, state_out, p.value)) %>% unique(), aes(label = sprintf('p=%1.4f', p.value)), x=1.6, hjust=1, y=.75, size = 2, alpha = .75, inherit.aes = FALSE) +
+  facet_grid(state_out ~ state_in, switch = 'y', ) +
+  scale_x_continuous('White matter lesion volume [ml]', trans = 'log10', breaks = breaks, minor_breaks = NULL) +
+  scale_y_continuous('Transition probability', position = 'right') +
+  guides(fill = 'none') +
+  theme_minimal() +
+  theme(strip.background = element_blank()
+        , strip.text = element_text(color = gray.colors(3)[1], size = 8)
+        , axis.text = element_text(size = 6))
+
+p.TP + p.TP.reg + plot_annotation(tag_levels = 'A', tag_suffix = ')') &  
+  theme(plot.tag.position  = c(.05, .85), plot.tag = element_text(size = 10)
+        , axis.text.y = element_text(hjust = .5)
+        , axis.text = element_text(color = gray.colors(3)[1])
+        , axis.title = element_text(size = 8))
+ggsave('./../../derivatives/figures/TPplot.png', device = 'png', width = 18, height = 9, units = 'cm', dpi = 600)
+
+image_read('./../../derivatives/figures/TPplot.png') %>% 
+  image_trim() %>% 
+  image_write('./../../derivatives/figures/TPplot.png')
+```
